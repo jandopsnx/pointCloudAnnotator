@@ -60,6 +60,9 @@ export class Annotation extends EventDispatcher {
 			</div>
 		`);
 
+		// Allow pointer events on annotation DOM despite container's pointer-events:none
+		this.domElement.css('pointer-events', 'auto');
+
 		this.elTitlebar = this.domElement.find('.annotation-titlebar');
 		this.elTitle = this.elTitlebar.find('.annotation-label');
 		this.elTitle.append(this._title);
@@ -71,6 +74,12 @@ export class Annotation extends EventDispatcher {
 			if(this.hasView()){
 				this.moveHere(this.scene.getActiveCamera());
 			}
+
+			// if there is saved description text, open the description when returning
+			if(this._description && this._description.length > 0){
+				this.setHighlighted(true);
+			}
+
 			this.dispatchEvent({type: 'click', target: this});
 		};
 
@@ -96,6 +105,25 @@ export class Annotation extends EventDispatcher {
 			this.elTitlebar.append(elButton);
 			elButton.click(() => action.onclick({annotation: this}));
 		}
+
+		// Delete button
+		let elDelete = $(`<span class="annotation-delete" title="Delete" style="margin-left:6px; cursor:pointer; opacity:0.6">✖</span>`);
+		this.elTitlebar.append(elDelete);
+
+		elDelete.click((e) => {
+			e.stopPropagation();
+			if(!confirm('Delete this annotation?')){
+				return;
+			}
+
+			if(this.parent){
+				this.parent.remove(this);
+			}else if(this.scene && this.scene.removeAnnotation){
+				this.scene.removeAnnotation(this);
+			}else{
+				this.dispose();
+			}
+		});
 
 		this.elDescriptionClose.hover(
 			e => this.elDescriptionClose.css('opacity', '1'),
@@ -503,8 +531,8 @@ export class Annotation extends EventDispatcher {
 	}
 
 	hasView () {
-		let hasPosTargetView = this.cameraTarget.x != null;
-		hasPosTargetView = hasPosTargetView && this.cameraPosition.x != null;
+		let hasPosTargetView = (this.cameraTarget && this.cameraTarget.x != null);
+		hasPosTargetView = hasPosTargetView && (this.cameraPosition && this.cameraPosition.x != null);
 
 		let hasRadiusView = this.radius !== undefined;
 

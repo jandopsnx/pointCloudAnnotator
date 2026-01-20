@@ -35,6 +35,11 @@
 				<input type="button" value="Default Scheme" onclick="setDefaultScheme()"/>
 				<input type="button" value="Tree Scheme" onclick="setTreeScheme()"/>
 				<input type="button" value="Random Scheme" onclick="setRandomScheme()"/>
+				<input type="button" id="saveAnnotationsBtn" value="Save Annotations"/>
+				<input type="button" id="loadAnnotationsBtn" value="Load Annotations"/>
+				<input type="button" id="exportAnnotationsBtn" value="Export Annotations"/>
+				<input type="file" id="importAnnotationsInput" style="display:none" accept="application/json"/>
+				<span id="annotationsStatus" style="margin-left:8px;color:#fff;font-size:12px"></span>
 			</span>
 
 		</div>
@@ -106,3 +111,419 @@
 	
   </body>
 </html>
+
+<script type="module">
+	import * as THREE from "../libs/three.js/build/three.module.js";
+	import {Utils} from "../src/utils.js";
+
+	// Create an annotation at the clicked 3D location and prompt for a short string
+	const canvas = viewer.renderer.domElement;
+
+	function utf8ByteLength(str){
+		// returns number of bytes in UTF-8 encoding
+		let s = str || '';
+		let bytes = 0;
+		for (let i = 0; i < s.length; i++){
+			let codePoint = s.charCodeAt(i);
+			if (codePoint <= 0x7f) bytes += 1;
+			else if (codePoint <= 0x7ff) bytes += 2;
+			else if (codePoint >= 0xd800 && codePoint <= 0xdbff){
+				// surrogate pair (4 bytes)
+				i++; bytes += 4;
+			} else bytes += 3;
+		}
+		return bytes;
+	}
+
+	function worldToScreen(position, camera){
+		let pos = position.clone();
+		pos.project(camera);
+
+		const size = viewer.renderer.getSize(new THREE.Vector2());
+		const x = (pos.x + 1) / 2 * size.width;
+		const y = (1 - (pos.y + 1) / 2) * size.height;
+
+		return {x, y};
+	}
+
+	const openEditors = new Map();
+
+	function showAnnotationInput(annotation, worldPos, opts = {}){
+		// opts: { removeOnCancel: true|false }
+		const removeOnCancel = opts.removeOnCancel !== undefined ? opts.removeOnCancel : true;
+		const container = document.getElementById('potree_annotation_container');
+		if(!container) return;
+
+		const camera = viewer.scene.getActiveCamera();
+
+		const el = document.createElement('div');
+		el.style.position = 'absolute';
+		el.style.zIndex = 100001;
+		el.style.pointerEvents = 'auto';
+		el.style.background = 'rgba(0,0,0,0.7)';
+		el.style.padding = '6px';
+		el.style.borderRadius = '4px';
+		el.style.color = 'white';
+		el.style.display = 'flex';
+		el.style.gap = '6px';
+
+		const input = document.createElement('input');
+		input.type = 'text';
+		input.placeholder = 'Enter text (max 256 bytes)';
+		input.style.width = '220px';
+		input.style.padding = '4px';
+		input.maxLength = 256; // rough guard (characters)
+
+		const btnSave = document.createElement('button');
+		btnSave.textContent = 'Save';
+		const btnCancel = document.createElement('button');
+		btnCancel.textContent = 'Cancel';
+
+		el.appendChild(input);
+		el.appendChild(btnSave);
+		el.appendChild(btnCancel);
+
+		// append to render area so pointer events work even if annotation container is non-interactive
+		const renderArea = viewer.renderArea || document.getElementById('potree_render_area') || document.body;
+		renderArea.appendChild(el);
+
+		function updatePosition(){
+			const pos = worldToScreen(worldPos, camera);
+			el.style.left = (pos.x + 8) + 'px';
+			el.style.top = (pos.y - 8) + 'px';
+		}
+
+		updatePosition();
+
+		// keep input positioned as camera/scene updates
+		const onUpdate = () => updatePosition();
+		viewer.addEventListener('update', onUpdate);
+
+		const remove = () => {
+			viewer.removeEventListener('update', onUpdate);
+			if (el.parentElement) el.parentElement.removeChild(el);
+			try{ openEditors.delete(annotation.uuid); }catch(e){}
+		};
+
+		input.addEventListener('input', () => {
+			// enforce UTF-8 256-byte limit
+			while(utf8ByteLength(input.value) > 256){
+				input.value = input.value.slice(0, -1);
+			}
+		});
+
+		function commitAndClose(){
+			if(!openEditors.has(annotation.uuid)) return;
+			let value = input.value || '';
+			while(utf8ByteLength(value) > 256) value = value.slice(0, -1);
+			annotation.description = value;
+			remove();
+			if(window.saveAnnotations instanceof Function){
+				window.saveAnnotations();
+			}
+		}
+
+		input.addEventListener('keydown', (ev) => {
+			if(ev.key === 'Enter'){
+				ev.preventDefault();
+				commitAndClose();
+			} else if(ev.key === 'Escape'){
+				ev.preventDefault();
+				if(removeOnCancel){ viewer.scene.removeAnnotation(annotation); }
+				remove();
+			}
+		});
+
+		input.addEventListener('blur', () => {
+			setTimeout(() => {
+				// if focus moved inside the editor, ignore
+				if(document.activeElement && el.contains(document.activeElement)) return;
+				commitAndClose();
+			}, 150);
+		});
+
+		btnCancel.addEventListener('click', () => {
+			// remove annotation if user cancels and this was a fresh annotation
+			if(removeOnCancel){
+				viewer.scene.removeAnnotation(annotation);
+			}
+			remove();
+		});
+
+		btnSave.addEventListener('click', () => {
+			// attach the string to the annotation (store in description)
+			let value = input.value || '';
+			// final truncate to 256 bytes if needed
+			while(utf8ByteLength(value) > 256){
+				value = value.slice(0, -1);
+			}
+			annotation.description = value;
+			remove();
+			// auto-save after editing description if persistence is available
+			if(window.saveAnnotations instanceof Function){
+				window.saveAnnotations();
+			}
+		});
+
+		// focus the input
+		input.focus();
+
+		// store editor reference so clicks can toggle/save
+		openEditors.set(annotation.uuid, {el, input, removeOnCancel});
+
+		// expose helpers to non-module scope
+		try{
+			window.showAnnotationInput = showAnnotationInput;
+			window.openAnnotationEditors = openEditors;
+		}catch(e){}
+
+		return {el, input};
+	}
+
+	function onClickCreateAnnotation(e){
+		const rect = canvas.getBoundingClientRect();
+		const mouse = {
+			x: e.clientX - rect.left,
+			y: e.clientY - rect.top
+		};
+
+		const camera = viewer.scene.getActiveCamera();
+		// commit any open editors before creating a new annotation
+		try{
+			const editors = window.openAnnotationEditors;
+			if(editors && editors.size){
+				for(const [uuid, ed] of editors){
+					try{
+						let v = ed.input.value || '';
+						// ensure 256-byte utf8 limit
+						function utf8Len(s){let b=0;for(let i=0;i<s.length;i++){let cp=s.charCodeAt(i);if(cp<=0x7f)b+=1;else if(cp<=0x7ff)b+=2;else if(cp>=0xd800&&cp<=0xdbff){i++;b+=4;}else b+=3;}return b;}
+						while(utf8Len(v) > 256) v = v.slice(0, -1);
+						// find annotation by uuid
+						let ann = null;
+						viewer.scene.annotations.traverse(a => { if(a.uuid === uuid) { ann = a; return false; } return true; });
+						if(ann){ ann.description = v; }
+					}catch(e){/* ignore per-editor errors */}
+				}
+				if(window.saveAnnotations instanceof Function) window.saveAnnotations();
+			}
+		}catch(err){}
+
+		const I = Utils.getMousePointCloudIntersection(
+			mouse,
+			camera,
+			viewer,
+			viewer.scene.pointclouds,
+			{pickClipped: true}
+		);
+
+		if(I){
+			const a = viewer.scene.addAnnotation(I.location, {
+				title: 'Marker',
+				description: ''
+			});
+
+			a.display = true;
+			a.installHandles(viewer);
+
+			// show input to attach a small string (<=256 bytes)
+			showAnnotationInput(a, I.location, {removeOnCancel: true});
+		}
+	}
+
+	canvas.addEventListener('click', onClickCreateAnnotation, false);
+</script>
+
+<script type="module">
+	// Persistence helpers: localStorage key, export, import
+	(function(){
+		const STORAGE_KEY = 'potree_annotations_classifications_example_v1';
+
+		function serializeAnnotations(){
+			const annotations = [];
+			viewer.scene.annotations.traverse(a => {
+				if(a === viewer.scene.annotations) return true; // skip root
+
+				if(!a.position) return true;
+
+				annotations.push({
+					uuid: a.uuid,
+					title: a.title,
+					description: a.description || '',
+					position: [a.position.x, a.position.y, a.position.z],
+					offset: [a.offset.x, a.offset.y, a.offset.z]
+				});
+
+				return true;
+			});
+
+			return annotations;
+		}
+
+		function saveToLocal(){
+			const data = serializeAnnotations();
+			try{
+				const json = JSON.stringify(data);
+				localStorage.setItem(STORAGE_KEY, json);
+				const statusEl = document.getElementById('annotationsStatus');
+				if(statusEl) statusEl.textContent = 'Saved ' + (data.length || 0) + ' annotations @ ' + (new Date()).toLocaleTimeString();
+				// keep alert for visibility in older setups
+				alert('Annotations saved to localStorage.');
+			}catch(e){
+				alert('Failed to save annotations: ' + e);
+			}
+		}
+
+		function loadFromLocal(){
+			const raw = localStorage.getItem(STORAGE_KEY);
+			if(!raw){
+				alert('No saved annotations found in localStorage.');
+				return;
+			}
+
+			try{
+				const data = JSON.parse(raw);
+				restoreAnnotations(data);
+				alert('Annotations loaded from localStorage.');
+			}catch(e){
+				alert('Failed to load annotations: ' + e);
+			}
+		}
+
+		function exportToFile(){
+			const data = serializeAnnotations();
+			const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = 'potree_annotations.json';
+			document.body.appendChild(a);
+			a.click();
+			a.remove();
+			URL.revokeObjectURL(url);
+		}
+
+		function importFromFile(file){
+			const reader = new FileReader();
+			reader.onload = () => {
+				try{
+					const data = JSON.parse(reader.result);
+					restoreAnnotations(data);
+					alert('Annotations imported.');
+				}catch(e){
+					alert('Failed to import annotations: ' + e);
+				}
+			};
+			reader.readAsText(file);
+		}
+
+		function restoreAnnotations(items){
+			// remove existing annotations (except root)
+			const toRemove = [];
+			viewer.scene.annotations.traverse(a => {
+				if(a === viewer.scene.annotations) return true;
+				toRemove.push(a);
+				return true;
+			});
+
+			for(const a of toRemove){
+				viewer.scene.removeAnnotation(a);
+			}
+
+			for(const it of items){
+				try{
+					const pos = it.position;
+					const ann = viewer.scene.addAnnotation([pos[0], pos[1], pos[2]], {
+						title: it.title || 'Marker',
+						description: it.description || ''
+					});
+					if(it.offset){
+						ann.offset.set(it.offset[0]||0, it.offset[1]||0, it.offset[2]||0);
+					}
+					ann.display = true;
+					ann.installHandles(viewer);
+				}catch(e){
+					console.warn('Failed to restore annotation', it, e);
+				}
+			}
+		}
+
+		document.getElementById('saveAnnotationsBtn').addEventListener('click', saveToLocal);
+		document.getElementById('loadAnnotationsBtn').addEventListener('click', loadFromLocal);
+		document.getElementById('exportAnnotationsBtn').addEventListener('click', exportToFile);
+		const importInput = document.getElementById('importAnnotationsInput');
+		importInput.addEventListener('change', (ev) => {
+			if(ev.target.files && ev.target.files.length > 0){
+				importFromFile(ev.target.files[0]);
+			}
+			// reset
+			ev.target.value = '';
+		});
+
+		// double-click Export button to trigger import file picker (convenience)
+		document.getElementById('exportAnnotationsBtn').addEventListener('dblclick', () => importInput.click());
+
+		// expose save function globally and auto-save on annotation additions
+		window.saveAnnotations = saveToLocal;
+
+		try{
+			// viewer.scene.annotations.addEventListener('annotation_added', () => {
+			// 	// small debounce not necessary for example; save immediately
+			// 	saveToLocal();
+			// });
+		}catch(e){
+			console.warn('Could not attach annotation_added listener for auto-save', e);
+		}
+
+		// save on page unload to ensure annotations persist
+		window.addEventListener('beforeunload', () => {
+			try{ saveToLocal(); }catch(e){}
+		});
+
+			// auto-load saved annotations (silent) if present
+			// try{
+			// 	const _raw = localStorage.getItem(STORAGE_KEY);
+			// 	if(_raw){
+			// 		const _data = JSON.parse(_raw);
+			// 		restoreAnnotations(_data);
+			// 	}
+			// }catch(e){
+			// 	console.warn('Auto-load annotations failed', e);
+			// }
+
+		// attach click-to-edit handler for annotations: click toggles open/save of editor
+		try{
+			viewer.scene.annotations.addEventListener('annotation_added', (e) => {
+				const ann = e.annotation;
+				try{
+					if(ann.domElement && ann.domElement[0]){
+						ann.domElement[0].dataset.uuid = ann.uuid;
+						// use jQuery to attach handler
+						$(ann.domElement[0]).on('click', (ev) => {
+							ev.stopPropagation();
+							const editors = window.openAnnotationEditors;
+							const existing = editors && editors.get ? editors.get(ann.uuid) : null;
+							if(existing){
+								// commit current value and close editor
+								let v = existing.input.value || '';
+								// ensure 256-byte UTF-8 limit
+								function utf8Len(s){let b=0;for(let i=0;i<s.length;i++){let cp=s.charCodeAt(i);if(cp<=0x7f)b+=1;else if(cp<=0x7ff)b+=2;else if(cp>=0xd800&&cp<=0xdbff){i++;b+=4;}else b+=3;}return b;}
+								while(utf8Len(v) > 256) v = v.slice(0, -1);
+								ann.description = v;
+								existing.el.remove();
+								editors.delete(ann.uuid);
+								if(window.saveAnnotations instanceof Function) window.saveAnnotations();
+							}else{
+								// open editor (do not remove annotation on cancel)
+								if(window.showAnnotationInput) window.showAnnotationInput(ann, ann.position, {removeOnCancel:false});
+							}
+						});
+					}
+				}catch(err){
+					console.warn('annotation_added attach handler failed', err);
+				}
+			});
+		}catch(e){
+			console.warn('Could not attach annotation_added listener for click-to-edit', e);
+		}
+	})();
+</script>
