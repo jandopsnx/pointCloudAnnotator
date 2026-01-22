@@ -2,6 +2,10 @@
 
 This example demonstrates Potree's classification visualization features for point clouds, allowing users to switch between different classification schemes (e.g., default, tree-based, or random colors). It also includes interactive annotation tools for marking points in 3D space.
 
+## About — Technical choices
+
+This example uses semantic HTML and vanilla JavaScript for structure and interactivity, and Potree (built on Three.js) for WebGL point-cloud rendering. Annotations persist client-side via `localStorage`; jQuery is used only sparingly for small UI enhancements. The goal is a lightweight, easy-to-embed example with minimal external dependencies.
+
 ## Features
 
 - **Classification Schemes**: Buttons to apply different color schemes to point classifications.
